@@ -1,4 +1,14 @@
-idea/
+# IDE
+.idea/
+
+# env
 .env
+
+# venv
 .venv/
-pycache/
+
+# python cache
+__pycache__/
+
+# macOS
+.DS_Store
