@@ -1,0 +1,84 @@
+services:
+  # 1. Long-Term Memory (Postgres)
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag_net
+
+  # 2. Short-Term Memory & Broker (Redis)
+  redis:
+    image: redis:7-alpine
+    restart: always
+    networks:
+      - rag_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 3. Knowledge Base (Qdrant)
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: always
+    ports:
+      - "6333:6333" # Exposed for local ingest script
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - rag_net
+
+  # 4. API Gateway
+  bot_api:
+    build: .
+    # SIMPLIFIED COMMAND:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    restart: always
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - rag_net
+    volumes:
+          - ./data:/app/data
+
+  # 5. The Brain (Celery Worker)
+  worker:
+    build: .
+    # SIMPLIFIED COMMAND:
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    env_file: .env
+    restart: always
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - rag_net
+
+volumes:
+  postgres_data:
+  qdrant_data:
+
+networks:
+  rag_net:

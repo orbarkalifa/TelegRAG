@@ -1,0 +1,23 @@
+[project]
+name = "telegrag"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "celery",
+    "redis",
+    "aiogram",
+    "structlog",
+    "pydantic-settings",
+    "qdrant-client",
+    "fastembed",
+    "sqlmodel",
+    "psycopg2-binary",
+    "asyncpg",
+    "sqlalchemy>=2.0.45",
+    "google-genai",
+    "pypdf",
+    "ruff>=0.14.10",
+]

@@ -1,0 +1,24 @@
+# --- Core Frameworks ---
+fastapi
+uvicorn[standard]
+celery
+redis
+aiogram
+
+# --- Database ---
+sqlmodel
+asyncpg
+psycopg2-binary
+
+# --- AI & RAG ---
+langchain
+langchain-google-genai
+langchain-qdrant
+qdrant-client
+google-generativeai
+
+# --- Utilities ---
+python-dotenv
+structlog
+python-json-logger
+httpx
