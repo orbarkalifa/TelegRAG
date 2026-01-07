@@ -36,8 +36,8 @@ graph LR
 * A Google Gemini API Key (from Google AI Studio)
 1. Clone the Repository
    ```
-   git clone [https://github.com/your-username/telegram-rag-bot.git](https://github.com/your-username/telegram-rag-bot.git)
-   cd telegram-rag-bot
+   git clone https://github.com/orbarkalifa/TelegRAG.git
+   cd telegrag
    ```
 2. Configure Environment
 Create a `.env` file in the root directory:
