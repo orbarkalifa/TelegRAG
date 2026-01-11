@@ -23,8 +23,18 @@ celery_app = Celery(
 
 _embedding_model = None
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+TELEGRAM_SEND_MESSAGE_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+TELEGRAM_CHAT_ACTION_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction"
 
+def send_typing(chat_id: int):
+    """Shows 'typing...' in the Telegram header."""
+    try:
+        requests.post(TELEGRAM_CHAT_ACTION_URL, json={
+            "chat_id": chat_id,
+            "action": "typing"
+        })
+    except Exception as e:
+        log.warning("send_typing_failed", error=str(e))
 
 def get_embedding_model():
     global _embedding_model
@@ -83,6 +93,8 @@ def process_rag_message(chat_id: int, text: str, trace_id: str):
     structlog.contextvars.bind_contextvars(trace_id=trace_id)
     log.info("worker_started", chat_id=chat_id)
 
+    send_typing(chat_id)
+
     with Session(sync_engine) as db:
         try:
             # 1. User & Message Recording
@@ -133,7 +145,7 @@ def process_rag_message(chat_id: int, text: str, trace_id: str):
             db.add(Message(user_id=chat_id, role="assistant", content=reply_text, trace_id=trace_id))
             db.commit()
 
-            requests.post(TELEGRAM_API_URL, json={"chat_id": chat_id, "text": reply_text, "parse_mode": "Markdown"})
+            requests.post(TELEGRAM_SEND_MESSAGE_URL, json={"chat_id": chat_id, "text": reply_text, "parse_mode": "Markdown"})
             log.info("worker_success", chat_id=chat_id)
 
         except Exception as e:
@@ -148,7 +160,7 @@ def process_document_upload(chat_id: int, file_id: str, file_name: str, trace_id
     log.info("worker_upload_started", filename=file_name)
 
     # Notify user processing started
-    requests.post(TELEGRAM_API_URL, json={"chat_id": chat_id, "text": f"⏳ Reading *{file_name}*..."})
+    requests.post(TELEGRAM_SEND_MESSAGE_URL, json={"chat_id": chat_id, "text": f"⏳ Reading *{file_name}*..."})
 
     try:
         file_bytes = download_telegram_file(file_id)
@@ -183,14 +195,14 @@ def process_document_upload(chat_id: int, file_id: str, file_name: str, trace_id
             db.add(Upload(filename=file_name, qdrant_collection="knowledge_base", chunk_count=len(text_chunks)))
             db.commit()
 
-        requests.post(TELEGRAM_API_URL, json={"chat_id": chat_id,
+        requests.post(TELEGRAM_SEND_MESSAGE_URL, json={"chat_id": chat_id,
                                               "text": f"✅ Processed *{file_name}*. I read {len(text_chunks)} segments.",
                                               "parse_mode": "Markdown"})
         log.info("worker_upload_success", filename=file_name)
 
     except Exception as e:
         log.error("worker_upload_failed", error=str(e))
-        requests.post(TELEGRAM_API_URL, json={"chat_id": chat_id, "text": f"❌ Error: {str(e)}"})
+        requests.post(TELEGRAM_SEND_MESSAGE_URL, json={"chat_id": chat_id, "text": f"❌ Error: {str(e)}"})
 
 
 # --- Helper: Download ---
@@ -267,9 +279,9 @@ def process_command(chat_id: int, command: str, trace_id: str):
             reply_text = f"I don't recognize the command `{command}`. Try /help."
 
         # Send Reply
-        requests.post(TELEGRAM_API_URL, json={"chat_id": chat_id, "text": reply_text, "parse_mode": "Markdown"})
+        requests.post(TELEGRAM_SEND_MESSAGE_URL, json={"chat_id": chat_id, "text": reply_text, "parse_mode": "Markdown"})
         log.info("worker_command_success", command=command)
 
     except Exception as e:
         log.error("worker_command_failed", error=str(e))
-        requests.post(TELEGRAM_API_URL, json={"chat_id": chat_id, "text": "❌ Command failed to execute."})
+        requests.post(TELEGRAM_SEND_MESSAGE_URL, json={"chat_id": chat_id, "text": "❌ Command failed to execute."})
