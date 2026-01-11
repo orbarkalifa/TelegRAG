@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # 1. Database
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag_net
+
+  # 2. Redis
+  redis:
+    image: redis:7-alpine
+    restart: always
+    networks:
+      - rag_net
+
+  # 3. Qdrant
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: always
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - rag_net
+
+  # 4. API Gateway (PULLS FROM HUB)
+  bot_api:
+    # 👇 REPLACE WITH YOUR USERNAME
+    image: orbarkalifa/telegrag-bot-api:latest 
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - rag_net
+
+  # 5. Worker (PULLS FROM HUB)
+  worker:
+    # 👇 REPLACE WITH YOUR USERNAME
+    image: orbarkalifa/telegrag-worker:latest
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    env_file: .env
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - rag_net
+
+volumes:
+  postgres_data:
+  qdrant_data:
+
+networks:
+  rag_net:
