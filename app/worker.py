@@ -10,6 +10,7 @@ from qdrant_client.models import PointStruct, VectorParams, Distance
 from fastembed import TextEmbedding
 from sqlmodel import Session, select, desc, delete
 from typing import List, Optional
+import re
 
 from app.database import sync_engine
 from app.models import User, Message, Upload
@@ -44,16 +45,35 @@ def get_embedding_model():
 def send_telegram(chat_id: int, text: str, parse_mode: str = "MarkdownV2"):
     """Helper to send messages with basic error handling and length clipping."""
     try:
-        # Telegram limit is 4096 chars
+        # 1. TRUNCATE FIRST (Avoid sending massive payloads)
         if len(text) > 4000:
-            text = text[:4000] + "...\n\n(Truncated due to length)"
+            text = text[:4000] + "..."
+
+        # 2. ESCAPE IF MARKDOWN (The source of your 400 errors)
+        # If the text already has formatting you want to keep, this is tricky.
+        # But most 400 errors come from unescaped '.' or '!' in the RAG output.
+        if parse_mode == "MarkdownV2":
+            # If the text doesn't look like it has intended markdown, escape it all
+            if not any(char in text for char in ['*', '_', '`', '[']):
+                text = escape_markdown_v2(text)
+            # If it does have formatting, we still must escape dots and dashes
+            else:
+                # Minimally escape characters that are almost never used for formatting
+                for char in ".!-()":
+                    text = text.replace(char, f"\\{char}")
 
         resp = requests.post(
             TELEGRAM_SEND_MESSAGE_URL,
             json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
             timeout=10
         )
-        resp.raise_for_status()
+
+        if resp.status_code != 200:
+            log.error("telegram_api_error", status=resp.status_code, detail=resp.text)
+            # Fallback: try sending as plain text if Markdown parsing failed
+            if resp.status_code == 400:
+                requests.post(TELEGRAM_SEND_MESSAGE_URL, json={"chat_id": chat_id, "text": text})
+
     except Exception as e:
         log.error("telegram_send_failed", error=str(e), chat_id=chat_id)
 
@@ -82,6 +102,15 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
         start += (chunk_size - overlap)
     return chunks
 
+def escape_markdown_v2(text: str) -> str:
+    """
+    Escapes reserved characters for Telegram MarkdownV2.
+    We avoid escaping * and _ if we want to allow basic formatting,
+    but for safety in RAG, it's often best to escape all.
+    """
+    # Characters that must be escaped in MarkdownV2
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
     filename = filename.lower()
@@ -209,20 +238,28 @@ def process_command(chat_id: int, command: str, trace_id: str):
     structlog.contextvars.bind_contextvars(trace_id=trace_id)
     client = QdrantClient(host="qdrant", port=6333)
 
+    # Use HTML for commands to avoid MarkdownV2 escaping nightmares
+    mode = "HTML"
+
     if command == "/start":
-        msg = "👋 **RAG Bot Active**\nUpload documents and ask me anything!"
+        msg = "👋 <b>RAG Bot Active</b>\nUpload documents and ask me anything!"
     elif command == "/newchat":
         with Session(sync_engine) as db:
             db.exec(delete(Message).where(Message.user_id == chat_id))
             db.commit()
-        msg = "🧹 **Conversation history cleared.**"
+        msg = "🧹 <b>Conversation history cleared.</b>"
     elif command == "/reset":
-        client.delete_collection("knowledge_base")
-        with Session(sync_engine) as db:
-            db.exec(delete(Upload))
-            db.commit()
-        msg = "💥 **Knowledge base wiped.**"
+        try:
+            if client.collection_exists("knowledge_base"):
+                client.delete_collection("knowledge_base")
+            with Session(sync_engine) as db:
+                db.exec(delete(Upload))
+                db.commit()
+            msg = "💥 <b>Knowledge base wiped.</b>"
+        except Exception as e:
+            log.error("reset_failed", error=str(e))
+            msg = "⚠️ <b>Reset failed:</b> Collection might already be gone."
     else:
         msg = "Unknown command. Try /start."
 
-    send_telegram(chat_id, msg)
+    send_telegram(chat_id, msg, parse_mode=mode)
