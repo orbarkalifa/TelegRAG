@@ -41,7 +41,7 @@ def get_embedding_model():
     return _embedding_model
 
 
-def send_telegram(chat_id: int, text: str, parse_mode: str = "Markdown"):
+def send_telegram(chat_id: int, text: str, parse_mode: str = "MarkdownV2"):
     """Helper to send messages with basic error handling and length clipping."""
     try:
         # Telegram limit is 4096 chars
