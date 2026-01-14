@@ -5,70 +5,51 @@ from structlog import get_logger
 
 log = get_logger()
 
-# 1. Initialize Client
 api_key = os.getenv("GEMINI_API_KEY")
-client = None
-
-if not api_key:
-    log.error("startup_error", error="GEMINI_API_KEY is missing!")
-else:
-    client = genai.Client(api_key=api_key)
-
-# 2. Select Model
-MODEL_ID = os.getenv('GEMINI_MODEL_ID', 'gemini-2.5-flash-lite')
+client = genai.Client(api_key=api_key) if api_key else None
+MODEL_ID = os.getenv('GEMINI_MODEL_ID', 'gemini-2.0-flash-exp')
 
 
 def generate_rag_response(question: str, context_text: str, history: List[dict]) -> str:
     """
-    Constructs the prompt and calls the new Google GenAI Client.
+    Generates a response using the Gemini API, strictly adhering to the
+    provided private user context.
     """
     if not client:
-        return "System Error: AI Client not initialized."
+        return "⚠️ AI Client not configured. Please check your GEMINI_API_KEY."
 
-    # --- A. Format History ---
+    # Format chat history for context awareness
     history_str = ""
-    if history:
-        history_str = "--- PREVIOUS CONVERSATION ---\n"
-        for msg in history:
-            # We use getattr to safely handle SQLModel objects
-            role = getattr(msg, 'role', 'user').capitalize()
-            content = getattr(msg, 'content', '')
-            history_str += f"{role}: {content}\n"
-        history_str += "-----------------------------\n"
+    for msg in history:
+        role = "User" if msg.role == "user" else "Assistant"
+        history_str += f"{role}: {msg.content}\n"
 
-    # --- B. Build Prompt (UPDATED LOGIC) ---
+    # Strict System Instructions for Privacy and Hallucination Control
     prompt = f"""
-    You are a smart and helpful AI assistant.
+    You are a professional Private RAG Assistant. 
 
-    SOURCES OF INFORMATION:
-    1. **Context**: Text retrieved from uploaded documents.
-    2. **History**: The recent conversation between you and the user.
+    CORE RULES:
+    1. PRIVACY: The "PRIVATE CONTEXT" below belongs ONLY to the current user. Never reference other users or external documents not provided here.
+    2. ACCURACY: Answer the user's question using the PROVIDED CONTEXT. 
+    3. HONESTY: If the answer is not in the context, say: "I'm sorry, I don't have information about that in your uploaded documents." 
+    4. TONE: Be helpful, concise, and professional.
+    5. FORMATTING: Use basic HTML tags (<b>, <i>, <code>) for emphasis. Avoid complex Markdown that might break the Telegram parser.
 
-    INSTRUCTIONS:
-    1. **Priority**: Always check **Context** first for factual answers.
-    2. **Conversational Fallback**: If the answer is NOT in the Context, check the **History**.
-    3. **Memory**: If the user provides information (e.g., "My name is Or"), acknowledge it and remember it for the next turn.
-    4. **Small Talk**: If the user says "Hello", "Thanks", or "Correct", reply naturally without needing documents.
-    5. **Strict Limit**: ONLY say "I don't have enough information in my documents" if the answer is missing from BOTH Context AND History.
-
+    --- CONVERSATION HISTORY ---
     {history_str}
 
-    --- CONTEXT ---
-    {context_text}
-    ---------------
+    --- PRIVATE CONTEXT (USER DOCUMENTS) ---
+    {context_text if context_text.strip() else "No documents have been uploaded by this user yet."}
 
-    User Question: {question}
-    Assistant's Response:
+    USER QUESTION: {question}
     """
 
-    # --- C. Call New API ---
     try:
         response = client.models.generate_content(
             model=MODEL_ID,
             contents=prompt
         )
         return response.text.strip()
-
     except Exception as e:
-        log.error("gemini_generation_failed", error=str(e))
-        return "I'm having trouble thinking right now. Please try again."
+        log.error("gemini_inference_failed", error=str(e))
+        return "I'm sorry, I encountered an error while thinking. Please try again in a moment."

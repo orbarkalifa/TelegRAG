@@ -1,75 +1,88 @@
+import os
 import uuid
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
+from pydantic import BaseModel, Field
+from typing import Optional
 import structlog
-from app.worker import process_rag_message, process_document_upload, process_command
-from app.database import init_db
-from app.models import User, Message
 
+from app.worker import celery_app
+
+# Structured Logging Setup
+structlog.configure(
+    processors=[
+        structlog.contextvars.inject_contextvars,
+        structlog.processors.JSONRenderer()
+    ]
+)
 log = structlog.get_logger()
 
-# Use lifespan context manager for startup/shutdown events
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    log.info("startup_event", status="initializing_database")
-    # This creates the tables in Postgres
-    await init_db()
-    log.info("startup_event", status="database_ready")
-    yield
+app = FastAPI(title="TeleRAG Bot API")
 
-app = FastAPI(lifespan=lifespan)
-
-# 1. Middleware: Assign Trace ID to every request
-@app.middleware("http")
-async def add_trace_id(request: Request, call_next):
-    trace_id = str(uuid.uuid4())
-    structlog.contextvars.bind_contextvars(trace_id=trace_id)
-
-    response = await call_next(request)
-    return response
+TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN")
 
 
-@app.get("/")
-async def health_check():
-    return {"status": "ok", "service": "telegram-rag-bot"}
+class TelegramMessage(BaseModel):
+    message_id: int
+    chat: dict
+    text: Optional[str] = None
+    document: Optional[dict] = None
+    photo: Optional[list] = None
 
 
-# 2. The Webhook Endpoint
-@app.post("/webhook")
-async def telegram_webhook(update: dict, request: Request):
-    ctx = structlog.contextvars.get_contextvars()
-    trace_id = ctx.get("trace_id")
+class TelegramUpdate(BaseModel):
+    update_id: int
+    message: Optional[TelegramMessage] = None
 
-    if "message" in update:
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
 
-        # CASE 1: Text Message
-        if "text" in msg:
-            text = msg["text"]
-
-            # CHECK FOR COMMANDS
-            if text.startswith("/"):
-                command = text.split(" ")[0].lower()  # Get "/start" from "/start now"
-                log.info("webhook_command_received", chat_id=chat_id, command=command)
-                process_command.delay(chat_id, command, trace_id)
-
-            # NORMAL CHAT
-            else:
-                log.info("webhook_text_received", chat_id=chat_id)
-                process_rag_message.delay(chat_id, text, trace_id)
-
-        # CASE 2: Document Upload
-        elif "document" in msg:
-            doc = msg["document"]
-            file_id = doc["file_id"]
-            file_name = doc.get("file_name", "unknown.txt")
-
-            allowed_exts = (".pdf", ".txt", ".md", ".json", ".csv", ".py")
-            if file_name.lower().endswith(allowed_exts):
-                log.info("webhook_doc_received", chat_id=chat_id, filename=file_name)
-                process_document_upload.delay(chat_id, file_id, file_name, trace_id)
-            else:
-                log.warning("webhook_doc_rejected", filename=file_name)
-
+@app.get("/health")
+def health_check():
     return {"status": "ok"}
+
+
+@app.post("/webhook")
+async def telegram_webhook(
+        update: TelegramUpdate,
+        x_telegram_bot_api_secret_token: Optional[str] = Header(None)
+):
+    """
+    Handles incoming webhooks from Telegram.
+    Routes messages, documents, and commands to the background worker.
+    """
+    # 1. Security Check
+    if TELEGRAM_SECRET_TOKEN and x_telegram_bot_api_secret_token != TELEGRAM_SECRET_TOKEN:
+        log.warning("unauthorized_webhook_attempt")
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    if not update.message:
+        return {"status": "ignored_no_message"}
+
+    chat_id = update.message.chat.get("id")
+    trace_id = str(uuid.uuid4())
+
+    log.info("webhook_received", chat_id=chat_id, trace_id=trace_id)
+
+    # 2. Route by Content Type
+
+    # Case A: User sent a command
+    if update.message.text and update.message.text.startswith("/"):
+        celery_app.send_task(
+            "app.worker.process_command",
+            args=[chat_id, update.message.text, trace_id]
+        )
+
+    # Case B: User sent a document (PDF/Text)
+    elif update.message.document:
+        doc = update.message.document
+        celery_app.send_task(
+            "app.worker.process_document_upload",
+            args=[chat_id, doc["file_id"], doc.get("file_name", "document"), trace_id]
+        )
+
+    # Case C: User sent a text message (RAG Query)
+    elif update.message.text:
+        celery_app.send_task(
+            "app.worker.process_rag_message",
+            args=[chat_id, update.message.text, trace_id]
+        )
+
+    return {"status": "queued", "trace_id": trace_id}
