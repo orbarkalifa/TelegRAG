@@ -1,11 +1,11 @@
 [project]
 name = "telegrag"
 version = "0.1.0"
-description = "Add your description here"
+description = "Telegram RAG Bot"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
-    "uvicorn",
+    "uvicorn[standard]",
     "celery",
     "redis",
     "aiogram",
@@ -17,7 +17,10 @@ dependencies = [
     "psycopg2-binary",
     "asyncpg",
     "sqlalchemy>=2.0.45",
+    "google-generativeai",
     "google-genai",
     "pypdf",
-    "ruff>=0.14.10",
+    "python-dotenv",
+    "httpx",
+    "watchdog"
 ]
