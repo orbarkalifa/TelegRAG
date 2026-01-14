@@ -16,6 +16,7 @@ from typing import List, Optional
 from app.database import sync_engine
 from app.models import User, Message, Upload
 from app.rag_engine import generate_rag_response
+from app.telegram_format import format_markdownv2_minimal  # NEW
 
 log = structlog.get_logger()
 
@@ -47,47 +48,42 @@ def get_embedding_model():
     return _embedding_model
 
 
-def escape_markdown_v2(text: str) -> str:
-    """
-    Escapes special characters for Telegram MarkdownV2.
-    It preserves basic formatting symbols (*, _, `) if used correctly
-    but ensures characters like . ! - ) ( don't crash the parser.
-    """
-    # Characters that must be escaped in MarkdownV2 outside of code/pre blocks
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    # We use a backslash to escape them
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
-
-
 def send_telegram(chat_id: int, text: str):
     """
-    Sends messages using MarkdownV2 with a plain-text fallback.
+    Sends a message using MarkdownV2 with a minimal formatter and plain-text fallback.
     """
+    # 1. Prepare formatted text
     try:
-        if len(text) > 4000:
-            text = text[:4000] + "..."
-
-        # 1. Escape the text
-        formatted_text = escape_markdown_v2(text)
-
-        payload = {
-            "chat_id": chat_id,
-            "text": formatted_text,
-            "parse_mode": "MarkdownV2"
-        }
-
-        resp = requests.post(TELEGRAM_SEND_MESSAGE_URL, json=payload, timeout=10)
-
-        # 2. Fallback: If MarkdownV2 fails, send as plain text
-        if resp.status_code != 200:
-            log.warning("telegram_md_failed_retrying_plain", error=resp.text)
-            payload.pop("parse_mode")
-            payload["text"] = text  # Original unescaped text
-            requests.post(TELEGRAM_SEND_MESSAGE_URL, json=payload, timeout=10)
-
-        resp.raise_for_status()
+        formatted_text = format_markdownv2_minimal(text)
+        parse_mode = "MarkdownV2"
     except Exception as e:
-        log.error("telegram_send_failed", error=str(e), chat_id=chat_id)
+        log.error("formatting_failed", error=str(e))
+        formatted_text = text
+        parse_mode = None
+
+    # 2. Handle length limits
+    if len(formatted_text) > 4000:
+        formatted_text = formatted_text[:4000] + "..."
+
+    # 3. Attempt send with MarkdownV2
+    resp = requests.post(
+        TELEGRAM_SEND_MESSAGE_URL,
+        json={"chat_id": chat_id, "text": formatted_text, "parse_mode": parse_mode},
+        timeout=10
+    )
+
+    # 4. Fallback if Markdown parsing fails (e.g. unclosed entities)
+    if not resp.ok and parse_mode == "MarkdownV2":
+        log.warn("markdown_v2_failed_falling_back", response=resp.text)
+        # Send original unescaped text without parse_mode
+        resp = requests.post(
+            TELEGRAM_SEND_MESSAGE_URL,
+            json={"chat_id": chat_id, "text": text},
+            timeout=10
+        )
+
+    # Ensure final attempt status is checked
+    resp.raise_for_status()
 
 
 def send_typing(chat_id: int):
@@ -137,6 +133,7 @@ def process_rag_message(chat_id: int, text: str, trace_id: str):
                 search_res = client.query_points(
                     collection_name="knowledge_base",
                     query=query_vector,
+                    # Crucial: Keep private data separation
                     query_filter=Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))]),
                     limit=5,
                     with_payload=True
@@ -167,6 +164,7 @@ def process_rag_message(chat_id: int, text: str, trace_id: str):
 @celery_app.task(name="app.worker.process_document_upload")
 def process_document_upload(chat_id: int, file_id: str, file_name: str, trace_id: str):
     structlog.contextvars.bind_contextvars(trace_id=trace_id)
+    send_telegram(chat_id, f"⏳ Reading **{file_name}**...")
     try:
         get_path_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
         file_path = requests.get(get_path_url).json()["result"]["file_path"]
@@ -200,7 +198,7 @@ def process_document_upload(chat_id: int, file_id: str, file_name: str, trace_id
                           chunk_count=len(chunks)))
             db.commit()
 
-        send_telegram(chat_id, f"✅ {file_name} indexed.")
+        send_telegram(chat_id, f"✅ **{file_name}** indexed.")
     except Exception as e:
         log.error("upload_failed", error=str(e))
         send_telegram(chat_id, f"❌ Error processing {file_name}.")
@@ -212,12 +210,12 @@ def process_command(chat_id: int, command: str, trace_id: str):
     client = QdrantClient(host="qdrant", port=6333)
     msg = ""
     if command == "/start":
-        msg = "👋 RAG Bot Active. Upload files to start."
+        msg = "👋 **RAG Bot Active**. Upload files to start."
     elif command == "/newchat":
         with Session(sync_engine) as db:
             db.exec(delete(Message).where(Message.user_id == chat_id))
             db.commit()
-        msg = "🧹 Chat history cleared."
+        msg = "🧹 **Chat history cleared.**"
     elif command == "/reset":
         client.delete(collection_name="knowledge_base", points_selector=FilterSelector(
             filter=Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))])
@@ -226,6 +224,6 @@ def process_command(chat_id: int, command: str, trace_id: str):
             db.exec(delete(Upload).where(Upload.user_id == chat_id))
             db.exec(delete(Message).where(Message.user_id == chat_id))
             db.commit()
-        msg = "💥 Knowledge base wiped."
+        msg = "💥 **Knowledge base wiped.**"
 
     if msg: send_telegram(chat_id, msg)
