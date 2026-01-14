@@ -3,6 +3,7 @@ import io
 import uuid
 import requests
 import structlog
+import re
 from pypdf import PdfReader
 from celery import Celery
 from celery.signals import worker_process_init
@@ -24,7 +25,6 @@ celery_app = Celery(
     backend=os.getenv("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
 )
 
-# Global holder for the model
 _embedding_model = None
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -34,13 +34,8 @@ TELEGRAM_CHAT_ACTION_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/se
 
 @worker_process_init.connect
 def init_worker(**kwargs):
-    """
-    Pre-loads the embedding model when the worker process starts.
-    This prevents the 'stuck' behavior caused by lazy loading in tasks.
-    """
     global _embedding_model
     log.info("worker_init_loading_model")
-    # Initializing here ensures the model is ready in the fork-pool memory
     _embedding_model = TextEmbedding()
     log.info("worker_init_model_ready")
 
@@ -52,15 +47,44 @@ def get_embedding_model():
     return _embedding_model
 
 
-def send_telegram(chat_id: int, text: str, parse_mode: str = "HTML"):
+def escape_markdown_v2(text: str) -> str:
+    """
+    Escapes special characters for Telegram MarkdownV2.
+    It preserves basic formatting symbols (*, _, `) if used correctly
+    but ensures characters like . ! - ) ( don't crash the parser.
+    """
+    # Characters that must be escaped in MarkdownV2 outside of code/pre blocks
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    # We use a backslash to escape them
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
+
+def send_telegram(chat_id: int, text: str):
+    """
+    Sends messages using MarkdownV2 with a plain-text fallback.
+    """
     try:
         if len(text) > 4000:
-            text = text[:4000] + "...\n\n(Truncated)"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+            text = text[:4000] + "..."
+
+        # 1. Escape the text
+        formatted_text = escape_markdown_v2(text)
+
+        payload = {
+            "chat_id": chat_id,
+            "text": formatted_text,
+            "parse_mode": "MarkdownV2"
+        }
+
         resp = requests.post(TELEGRAM_SEND_MESSAGE_URL, json=payload, timeout=10)
-        if resp.status_code == 400:
+
+        # 2. Fallback: If MarkdownV2 fails, send as plain text
+        if resp.status_code != 200:
+            log.warning("telegram_md_failed_retrying_plain", error=resp.text)
             payload.pop("parse_mode")
-            resp = requests.post(TELEGRAM_SEND_MESSAGE_URL, json=payload, timeout=10)
+            payload["text"] = text  # Original unescaped text
+            requests.post(TELEGRAM_SEND_MESSAGE_URL, json=payload, timeout=10)
+
         resp.raise_for_status()
     except Exception as e:
         log.error("telegram_send_failed", error=str(e), chat_id=chat_id)
@@ -91,12 +115,7 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> Optional[str]:
             reader = PdfReader(io.BytesIO(file_bytes))
             text = "\n".join([p.extract_text() for p in reader.pages if p.extract_text()])
             return text if text.strip() else None
-
-        if b'\x00' in file_bytes[:1024]:
-            return None
-
-        decoded_text = file_bytes.decode("utf-8", errors="ignore")
-        return decoded_text if decoded_text.strip() else None
+        return file_bytes.decode("utf-8", errors="ignore")
     except Exception as e:
         log.error("extraction_failed", error=str(e), filename=filename)
         return None
@@ -111,8 +130,6 @@ def process_rag_message(chat_id: int, text: str, trace_id: str):
         try:
             client = QdrantClient(host="qdrant", port=6333)
             model = get_embedding_model()
-
-            # Use generator to handle memory better
             query_vector = next(model.embed([text]))
 
             search_res = []
@@ -120,9 +137,7 @@ def process_rag_message(chat_id: int, text: str, trace_id: str):
                 search_res = client.query_points(
                     collection_name="knowledge_base",
                     query=query_vector,
-                    query_filter=Filter(
-                        must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))]
-                    ),
+                    query_filter=Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))]),
                     limit=5,
                     with_payload=True
                 ).points
@@ -131,9 +146,7 @@ def process_rag_message(chat_id: int, text: str, trace_id: str):
 
             context_text = ""
             for hit in search_res:
-                source = hit.payload.get('source', 'Unknown')
-                chunk = hit.payload.get('text', '')
-                context_text += f"[Source: {source}]\n{chunk}\n\n"
+                context_text += f"[Source: {hit.payload.get('source')}]\n{hit.payload.get('text')}\n\n"
 
             history_query = select(Message).where(Message.user_id == chat_id).order_by(desc(Message.created_at)).limit(
                 6)
@@ -148,38 +161,26 @@ def process_rag_message(chat_id: int, text: str, trace_id: str):
             send_telegram(chat_id, reply_text)
         except Exception as e:
             log.error("rag_task_failed", error=str(e))
-            send_telegram(chat_id, "⚠️ Sorry, I encountered an error processing that request.")
+            send_telegram(chat_id, "⚠️ Error processing request.")
 
 
 @celery_app.task(name="app.worker.process_document_upload")
 def process_document_upload(chat_id: int, file_id: str, file_name: str, trace_id: str):
     structlog.contextvars.bind_contextvars(trace_id=trace_id)
-    log.info("upload_started", file_name=file_name)
-
     try:
-        # 1. Download from Telegram
         get_path_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
-        file_path = requests.get(get_path_url, timeout=10).json()["result"]["file_path"]
-        file_bytes = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}",
-                                  timeout=30).content
-        log.info("file_downloaded", size=len(file_bytes))
+        file_path = requests.get(get_path_url).json()["result"]["file_path"]
+        file_bytes = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}").content
 
-        # 2. Extract Text
         full_text = extract_text_from_file(file_bytes, file_name)
-        if full_text is None:
-            send_telegram(chat_id, f"❌ <b>{file_name}</b> is not a readable text file.")
+        if not full_text:
+            send_telegram(chat_id, f"❌ {file_name} is unreadable.")
             return
 
-        # 3. Chunking
         chunks = chunk_text(full_text)
-        log.info("text_chunked", count=len(chunks))
-
-        # 4. Embedding
         model = get_embedding_model()
         embeddings = list(model.embed(chunks))
-        log.info("embeddings_generated")
 
-        # 5. Qdrant Upsert
         client = QdrantClient(host="qdrant", port=6333)
         if not client.collection_exists("knowledge_base"):
             client.create_collection(
@@ -188,61 +189,43 @@ def process_document_upload(chat_id: int, file_id: str, file_name: str, trace_id
             )
 
         points = [
-            PointStruct(
-                id=str(uuid.uuid4()),
-                vector=v.tolist(),
-                payload={"text": c, "source": file_name, "user_id": chat_id}
-            ) for c, v in zip(chunks, embeddings)
+            PointStruct(id=str(uuid.uuid4()), vector=v.tolist(),
+                        payload={"text": c, "source": file_name, "user_id": chat_id})
+            for c, v in zip(chunks, embeddings)
         ]
-
         client.upsert(collection_name="knowledge_base", points=points)
-        log.info("upsert_complete", point_count=len(points))
 
-        # 6. Database Record
         with Session(sync_engine) as db:
             db.add(Upload(filename=file_name, user_id=chat_id, qdrant_collection="knowledge_base",
                           chunk_count=len(chunks)))
             db.commit()
 
-        send_telegram(chat_id, f"✅ <b>{file_name}</b> indexed successfully.")
-
+        send_telegram(chat_id, f"✅ {file_name} indexed.")
     except Exception as e:
-        log.error("upload_task_failed", error=str(e))
-        send_telegram(chat_id, f"❌ Error processing <b>{file_name}</b>.")
+        log.error("upload_failed", error=str(e))
+        send_telegram(chat_id, f"❌ Error processing {file_name}.")
 
 
 @celery_app.task(name="app.worker.process_command")
 def process_command(chat_id: int, command: str, trace_id: str):
     structlog.contextvars.bind_contextvars(trace_id=trace_id)
     client = QdrantClient(host="qdrant", port=6333)
-
+    msg = ""
     if command == "/start":
-        msg = "👋 <b>RAG Bot Active</b>\nUpload PDFs or text files to start."
+        msg = "👋 RAG Bot Active. Upload files to start."
     elif command == "/newchat":
         with Session(sync_engine) as db:
             db.exec(delete(Message).where(Message.user_id == chat_id))
             db.commit()
-        msg = "🧹 <b>Chat history cleared.</b>"
+        msg = "🧹 Chat history cleared."
     elif command == "/reset":
-        try:
-            # Use FilterSelector to properly wrap the points deletion criteria
-            client.delete(
-                collection_name="knowledge_base",
-                points_selector=FilterSelector(
-                    filter=Filter(
-                        must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))]
-                    )
-                )
-            )
-            with Session(sync_engine) as db:
-                db.exec(delete(Upload).where(Upload.user_id == chat_id))
-                db.exec(delete(Message).where(Message.user_id == chat_id))
-                db.commit()
-            msg = "💥 <b>Knowledge base wiped.</b>"
-        except Exception as e:
-            log.error("reset_failed", error=str(e))
-            msg = "⚠️ <b>Reset failed.</b> Check if the collection exists or if the user has data."
-    else:
-        msg = "Unknown command."
+        client.delete(collection_name="knowledge_base", points_selector=FilterSelector(
+            filter=Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))])
+        ))
+        with Session(sync_engine) as db:
+            db.exec(delete(Upload).where(Upload.user_id == chat_id))
+            db.exec(delete(Message).where(Message.user_id == chat_id))
+            db.commit()
+        msg = "💥 Knowledge base wiped."
 
-    send_telegram(chat_id, msg)
+    if msg: send_telegram(chat_id, msg)
