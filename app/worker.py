@@ -7,7 +7,7 @@ from pypdf import PdfReader
 from celery import Celery
 from celery.signals import worker_process_init
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, VectorParams, Distance, Filter, FieldCondition, MatchValue
+from qdrant_client.models import PointStruct, VectorParams, Distance, Filter, FieldCondition, MatchValue, FilterSelector
 from fastembed import TextEmbedding
 from sqlmodel import Session, select, desc, delete
 from typing import List, Optional
@@ -225,9 +225,15 @@ def process_command(chat_id: int, command: str, trace_id: str):
         msg = "🧹 <b>Chat history cleared.</b>"
     elif command == "/reset":
         try:
-            client.delete(collection_name="knowledge_base", points_selector=Filter(
-                must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))]
-            ))
+            # Use FilterSelector to properly wrap the points deletion criteria
+            client.delete(
+                collection_name="knowledge_base",
+                points_selector=FilterSelector(
+                    filter=Filter(
+                        must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))]
+                    )
+                )
+            )
             with Session(sync_engine) as db:
                 db.exec(delete(Upload).where(Upload.user_id == chat_id))
                 db.exec(delete(Message).where(Message.user_id == chat_id))
@@ -235,7 +241,7 @@ def process_command(chat_id: int, command: str, trace_id: str):
             msg = "💥 <b>Knowledge base wiped.</b>"
         except Exception as e:
             log.error("reset_failed", error=str(e))
-            msg = "⚠️ <b>Reset failed.</b>"
+            msg = "⚠️ <b>Reset failed.</b> Check if the collection exists or if the user has data."
     else:
         msg = "Unknown command."
 
