@@ -1,4 +1,5 @@
 # --- Core Frameworks ---
+
 fastapi
 uvicorn[standard]
 celery
@@ -6,19 +7,28 @@ redis
 aiogram
 
 # --- Database ---
+
 sqlmodel
 asyncpg
 psycopg2-binary
+sqlalchemy>=2.0.45
 
 # --- AI & RAG ---
+
 langchain
 langchain-google-genai
 langchain-qdrant
 qdrant-client
+fastembed
 google-generativeai
+google-genai
 
 # --- Utilities ---
+
 python-dotenv
 structlog
 python-json-logger
 httpx
+pydantic-settings
+pypdf
+ruff>=0.14.10

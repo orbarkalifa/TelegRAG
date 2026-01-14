@@ -17,7 +17,6 @@ dependencies = [
     "psycopg2-binary",
     "asyncpg",
     "sqlalchemy>=2.0.45",
-    "google-generativeai",
     "google-genai",
     "pypdf",
     "python-dotenv",
