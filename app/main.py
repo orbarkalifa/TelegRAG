@@ -1,19 +1,15 @@
 import os
 import uuid
-from fastapi import FastAPI, Request, Header, HTTPException, BackgroundTasks
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Request, Header, HTTPException
+from pydantic import BaseModel
 from typing import Optional
 import structlog
 
 from app.worker import celery_app
+from app.logger_setup import setup_logger
 
-# Structured Logging Setup
-structlog.configure(
-    processors=[
-        structlog.contextvars.inject_contextvars,
-        structlog.processors.JSONRenderer()
-    ]
-)
+# Use your existing unified logger setup
+setup_logger()
 log = structlog.get_logger()
 
 app = FastAPI(title="TeleRAG Bot API")
@@ -57,9 +53,11 @@ async def telegram_webhook(
         return {"status": "ignored_no_message"}
 
     chat_id = update.message.chat.get("id")
+    # Bind trace_id to the context so all logs for this request share it
     trace_id = str(uuid.uuid4())
+    structlog.contextvars.bind_contextvars(trace_id=trace_id)
 
-    log.info("webhook_received", chat_id=chat_id, trace_id=trace_id)
+    log.info("webhook_received", chat_id=chat_id)
 
     # 2. Route by Content Type
 
@@ -70,7 +68,7 @@ async def telegram_webhook(
             args=[chat_id, update.message.text, trace_id]
         )
 
-    # Case B: User sent a document (PDF/Text)
+    # Case B: User sent a document (Any readable text file)
     elif update.message.document:
         doc = update.message.document
         celery_app.send_task(
