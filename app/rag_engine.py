@@ -25,15 +25,15 @@ def generate_rag_response(query: str, context: str, history: list = None) -> str
         contents = []
         if history:
             for msg in history:
-                role = "user" if msg["role"] == "user" else "model"
-                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
+                role = "user" if msg.role == "user" else "model"
+                contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg.content or "")]))
 
         # Add the current query
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=query)]))
 
         # Generate response using the new SDK syntax
         response = client.models.generate_content(
-            model="gemini-2.0-flash",  # or your preferred version
+            model=os.getenv('GEMINI_MODEL_ID'),
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
