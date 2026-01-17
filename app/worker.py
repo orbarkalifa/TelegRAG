@@ -16,7 +16,7 @@ from typing import List, Optional
 from app.database import sync_engine
 from app.models import User, Message, Upload
 from app.rag_engine import generate_rag_response
-from app.telegram_format import format_markdownv2_minimal  # NEW
+from app.telegram_format import telegram_markdownv2_sanitize  # NEW
 
 log = structlog.get_logger()
 
@@ -54,7 +54,7 @@ def send_telegram(chat_id: int, text: str):
     """
     # 1. Prepare formatted text
     try:
-        formatted_text = format_markdownv2_minimal(text)
+        formatted_text = telegram_markdownv2_sanitize(text)
         parse_mode = "MarkdownV2"
     except Exception as e:
         log.error("formatting_failed", error=str(e))

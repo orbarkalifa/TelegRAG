@@ -1,83 +1,77 @@
 import re
 
+# Telegram MarkdownV2 special chars (outside code/pre)
+_MD2_SPECIALS = r"_*[]()~`>#+-=|{}.!\\"
 
-def escape_markdown_v2(text: str, entity_type: str = "text") -> str:
-    """
-    Escapes characters for Telegram MarkdownV2.
-    Different escaping rules apply inside code blocks vs normal text.
-    """
-    if entity_type == "text":
-        # Characters that MUST be escaped in normal text
-        escape_chars = r'_*[]()~`>#+-=|{}.!'
-    else:
-        # Inside code blocks/inline code, only backslash and backtick need escaping
-        escape_chars = r'\`'
+def _escape_md2_text(s: str) -> str:
+    # Escape every special char for MarkdownV2 (outside code)
+    return re.sub(rf"([{re.escape(_MD2_SPECIALS)}])", r"\\\1", s)
 
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+def _escape_md2_code(s: str) -> str:
+    # Inside `code` and ```pre``` only `\` and backtick must be escaped
+    return s.replace("\\", "\\\\").replace("`", "\\`")
 
+_CODEBLOCK_RE = re.compile(r"```(\w+)?\n([\s\S]*?)```", re.MULTILINE)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 
-def format_markdownv2_minimal(text: str) -> str:
-    """
-    A robust formatter that:
-    1. Protects code blocks (```...```)
-    2. Protects inline code (`...`)
-    3. Protects bold (**...**) and italic (*...*)
-    4. Escapes everything else for MarkdownV2
-    """
-    # 1. Protect code blocks
-    code_blocks = []
+# Very conservative bold: only **...** on the same line (no nesting)
+_BOLD_RE = re.compile(r"\*\*([^\n*][\s\S]*?[^\n*])\*\*")
 
-    def save_code_block(match):
-        code_blocks.append(match.group(0))
-        return f"__CODE_BLOCK_{len(code_blocks) - 1}__"
+def telegram_markdownv2_sanitize(text: str) -> str:
+    if not text:
+        return ""
 
-    # We use a non-greedy match for code blocks
-    text = re.sub(r'```.*?```', save_code_block, text, flags=re.DOTALL)
+    # Normalize newlines
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
 
-    # 2. Protect inline code
-    inline_codes = []
+    # 1) Protect fenced code blocks
+    codeblocks = []
+    def _cb_sub(m):
+        lang = m.group(1) or ""
+        body = m.group(2) or ""
+        codeblocks.append((lang, body))
+        return f"__CB_{len(codeblocks)-1}__"
+    text = _CODEBLOCK_RE.sub(_cb_sub, text)
 
-    def save_inline_code(match):
-        inline_codes.append(match.group(0))
-        return f"__INLINE_CODE_{len(inline_codes) - 1}__"
+    # 2) Protect inline code
+    inlines = []
+    def _ic_sub(m):
+        body = m.group(1) or ""
+        inlines.append(body)
+        return f"__IC_{len(inlines)-1}__"
+    text = _INLINE_CODE_RE.sub(_ic_sub, text)
 
-    text = re.sub(r'`[^`\n]+`', save_inline_code, text)
+    # 3) Convert common LLM bullets BEFORE escaping
+    # (avoid turning "* " into a formatting token)
+    text = re.sub(r"(?m)^\s*-\s+", "• ", text)
+    text = re.sub(r"(?m)^\s*\*\s+", "• ", text)
 
-    # 3. Handle formatting tokens and escape prose
-    # Characters to protect: ** (bold), * (italic), • (bullet)
-    # We'll split the text by bold and italic markers
-    parts = re.split(r'(\*\*|\*)', text)
+    # 4) Extract safe bold segments from LLM-style **...**
+    bolds = []
+    def _b_sub(m):
+        bolds.append(m.group(1))
+        return f"__B_{len(bolds)-1}__"
+    text = _BOLD_RE.sub(_b_sub, text)
 
-    processed_parts = []
-    in_bold = False
-    in_italic = False
+    # 5) Escape everything else as plain text
+    text = _escape_md2_text(text)
 
-    for part in parts:
-        if part == "**":
-            processed_parts.append(part)
-            in_bold = not in_bold
-        elif part == "*":
-            processed_parts.append(part)
-            in_italic = not in_italic
+    # 6) Restore bold segments as Telegram *...*
+    for i, b in enumerate(bolds):
+        safe_b = _escape_md2_text(b)  # still must escape specials inside bold
+        text = text.replace(f"__B_{i}__", f"*{safe_b}*")
+
+    # 7) Restore inline code
+    for i, body in enumerate(inlines):
+        safe_body = _escape_md2_code(body)
+        text = text.replace(f"__IC_{i}__", f"`{safe_body}`")
+
+    # 8) Restore fenced code blocks
+    for i, (lang, body) in enumerate(codeblocks):
+        safe_body = _escape_md2_code(body)
+        if lang:
+            text = text.replace(f"__CB_{i}__", f"```{lang}\n{safe_body}```")
         else:
-            # This is normal prose - escape it!
-            # Also convert common bullet points to the '•' character
-            escaped = part.replace("- ", "• ").replace("* ", "• ")
-            processed_parts.append(escape_markdown_v2(escaped))
-
-    text = "".join(processed_parts)
-
-    # 4. Restore code entities
-    # Note: Inside these, we only escape \ and `
-    for i, block in enumerate(code_blocks):
-        # Extract content, escape internals, wrap in backticks
-        content = block[3:-3]
-        safe_block = f"```\n{escape_markdown_v2(content, 'code')}\n```"
-        text = text.replace(f"__CODE_BLOCK_{i}__", safe_block)
-
-    for i, code in enumerate(inline_codes):
-        content = code[1:-1]
-        safe_code = f"`{escape_markdown_v2(content, 'code')}`"
-        text = text.replace(f"__INLINE_CODE_{i}__", safe_code)
+            text = text.replace(f"__CB_{i}__", f"```\n{safe_body}```")
 
     return text
