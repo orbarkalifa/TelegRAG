@@ -200,13 +200,14 @@ def process_command(chat_id: int, command: str, trace_id: str):
     structlog.contextvars.bind_contextvars(trace_id=trace_id)
     client = QdrantClient(host="qdrant", port=6333)
     msg = ""
+
     if command == "/start":
-        msg = "👋 **RAG Bot Active**. Upload files to start."
+        msg = "👋 RAG Bot Active. Upload files to start."
     elif command == "/newchat":
         with Session(sync_engine) as db:
             db.exec(delete(Message).where(Message.user_id == chat_id))
             db.commit()
-        msg = "🧹 **Chat history cleared.**"
+        msg = "🧹 Chat history cleared."
     elif command == "/reset":
         client.delete(collection_name="knowledge_base", points_selector=FilterSelector(
             filter=Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))])
@@ -215,6 +216,6 @@ def process_command(chat_id: int, command: str, trace_id: str):
             db.exec(delete(Upload).where(Upload.user_id == chat_id))
             db.exec(delete(Message).where(Message.user_id == chat_id))
             db.commit()
-        msg = "💥 **Knowledge base wiped.**"
+        msg = "💥 Knowledge base wiped."
 
     if msg: send_telegram(chat_id, msg)
