@@ -81,7 +81,6 @@ def send_telegram(chat_id: int, text: str):
             json={"chat_id": chat_id, "text": text},
             timeout=10
         )
-
     # Ensure final attempt status is checked
     resp.raise_for_status()
 
@@ -209,13 +208,14 @@ def process_command(chat_id: int, command: str, trace_id: str):
     structlog.contextvars.bind_contextvars(trace_id=trace_id)
     client = QdrantClient(host="qdrant", port=6333)
     msg = ""
+
     if command == "/start":
-        msg = "👋 **RAG Bot Active**. Upload files to start."
+        msg = r"👋 *RAG Bot Active*\. Upload files to start\."
     elif command == "/newchat":
         with Session(sync_engine) as db:
             db.exec(delete(Message).where(Message.user_id == chat_id))
             db.commit()
-        msg = "🧹 **Chat history cleared.**"
+        msg = r"🧹 *Chat history cleared\.*"
     elif command == "/reset":
         client.delete(collection_name="knowledge_base", points_selector=FilterSelector(
             filter=Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=chat_id))])
@@ -223,7 +223,8 @@ def process_command(chat_id: int, command: str, trace_id: str):
         with Session(sync_engine) as db:
             db.exec(delete(Upload).where(Upload.user_id == chat_id))
             db.exec(delete(Message).where(Message.user_id == chat_id))
+            db.add(Message(user_id=chat_id, role="user_id", content=command, trace_id=trace_id))
             db.commit()
-        msg = "💥 **Knowledge base wiped.**"
+        msg = r"💥 *Knowledge base wiped\.*"
 
     if msg: send_telegram(chat_id, msg)
