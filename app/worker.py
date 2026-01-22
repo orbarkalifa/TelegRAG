@@ -16,7 +16,7 @@ from typing import List, Optional
 from app.database import sync_engine
 from app.models import User, Message, Upload
 from app.rag_engine import generate_rag_response
-from app.telegram_format import telegram_markdownv2_sanitize  # NEW
+from app.telegram_format import telegram_md2
 
 log = structlog.get_logger()
 
@@ -49,41 +49,32 @@ def get_embedding_model():
 
 
 def send_telegram(chat_id: int, text: str):
-    """
-    Sends a message using MarkdownV2 with a minimal formatter and plain-text fallback.
-    """
-    # 1. Prepare formatted text
-    try:
-        formatted_text = telegram_markdownv2_sanitize(text)
-        parse_mode = "MarkdownV2"
-    except Exception as e:
-        log.error("formatting_failed", error=str(e))
-        formatted_text = text
-        parse_mode = None
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
 
-    # 2. Handle length limits
-    if len(formatted_text) > 4000:
-        formatted_text = formatted_text[:4000] + "..."
+    # Format to MarkdownV2
+    formatted = telegram_md2(raw)
+    payload = {"chat_id": chat_id, "text": formatted, "parse_mode": "MarkdownV2"}
 
-    # 3. Attempt send with MarkdownV2
-    resp = requests.post(
-        TELEGRAM_SEND_MESSAGE_URL,
-        json={"chat_id": chat_id, "text": formatted_text, "parse_mode": parse_mode},
-        timeout=10
-    )
+    # Telegram hard limit is 4096; keep a small margin
+    if len(payload["text"]) > 4096:
+        payload["text"] = payload["text"][:4093] + "..."
 
-    # 4. Fallback if Markdown parsing fails (e.g. unclosed entities)
-    if not resp.ok and parse_mode == "MarkdownV2":
-        log.warn("markdown_v2_failed_falling_back", response=resp.text)
-        # Send original unescaped text without parse_mode
+    resp = requests.post(TELEGRAM_SEND_MESSAGE_URL, json=payload, timeout=10)
+
+    # Fallback: plain text, no parse_mode (omit parse_mode entirely)
+    if not resp.ok:
+        log.warning("telegram_send_failed_markdown_fallback", response=resp.text)
+        fallback_text = raw
+        if len(fallback_text) > 4096:
+            fallback_text = fallback_text[:4093] + "..."
         resp = requests.post(
             TELEGRAM_SEND_MESSAGE_URL,
-            json={"chat_id": chat_id, "text": text},
+            json={"chat_id": chat_id, "text": fallback_text},
             timeout=10
         )
 
-    # Ensure final attempt status is checked
     resp.raise_for_status()
+
 
 
 def send_typing(chat_id: int):

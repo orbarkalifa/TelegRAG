@@ -8,7 +8,7 @@ import structlog
 from app.worker import celery_app
 from app.logger_setup import setup_logger
 
-# Use your existing unified logger setup
+
 setup_logger()
 log = structlog.get_logger()
 

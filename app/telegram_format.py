@@ -1,77 +1,82 @@
+# telegram_format.py
 import re
 
-# Telegram MarkdownV2 special chars (outside code/pre)
+# Telegram MarkdownV2 special chars
 _MD2_SPECIALS = r"_*[]()~`>#+-=|{}.!\\"
 
-def _escape_md2_text(s: str) -> str:
-    # Escape every special char for MarkdownV2 (outside code)
+def escape_md2(s: str) -> str:
+    """Escape text for Telegram MarkdownV2 (outside code)."""
     return re.sub(rf"([{re.escape(_MD2_SPECIALS)}])", r"\\\1", s)
 
-def _escape_md2_code(s: str) -> str:
-    # Inside `code` and ```pre``` only `\` and backtick must be escaped
+def escape_code(s: str) -> str:
+    """Escape inside `code` and ```code``` blocks (only backslash and backtick)."""
     return s.replace("\\", "\\\\").replace("`", "\\`")
 
+# Regexes
 _CODEBLOCK_RE = re.compile(r"```(\w+)?\n([\s\S]*?)```", re.MULTILINE)
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_RE = re.compile(r"\*\*([^\n*][\s\S]*?[^\n*])\*\*")  # conservative
 
-# Very conservative bold: only **...** on the same line (no nesting)
-_BOLD_RE = re.compile(r"\*\*([^\n*][\s\S]*?[^\n*])\*\*")
-
-def telegram_markdownv2_sanitize(text: str) -> str:
+def telegram_md2(text: str) -> str:
+    """
+    Convert a small subset of Markdown-like output into safe Telegram MarkdownV2:
+    - **bold** -> *bold*
+    - `inline` preserved
+    - ```fenced``` preserved
+    - bullets -, * -> •
+    Everything else is escaped.
+    """
     if not text:
         return ""
 
-    # Normalize newlines
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
 
-    # 1) Protect fenced code blocks
-    codeblocks = []
-    def _cb_sub(m):
-        lang = m.group(1) or ""
-        body = m.group(2) or ""
-        codeblocks.append((lang, body))
-        return f"__CB_{len(codeblocks)-1}__"
-    text = _CODEBLOCK_RE.sub(_cb_sub, text)
+    # Protect blocks with tokens that contain NO md2 specials (no _,*,[,],..., etc.)
+    codeblocks: list[tuple[str, str]] = []
+    inlines: list[str] = []
+    bolds: list[str] = []
 
-    # 2) Protect inline code
-    inlines = []
-    def _ic_sub(m):
-        body = m.group(1) or ""
-        inlines.append(body)
-        return f"__IC_{len(inlines)-1}__"
-    text = _INLINE_CODE_RE.sub(_ic_sub, text)
+    def cb_sub(m):
+        idx = len(codeblocks)
+        codeblocks.append((m.group(1) or "", m.group(2) or ""))
+        return f"CBTOKEN{idx}X"
 
-    # 3) Convert common LLM bullets BEFORE escaping
-    # (avoid turning "* " into a formatting token)
-    text = re.sub(r"(?m)^\s*-\s+", "• ", text)
-    text = re.sub(r"(?m)^\s*\*\s+", "• ", text)
+    def ic_sub(m):
+        idx = len(inlines)
+        inlines.append(m.group(1) or "")
+        return f"ICTOKEN{idx}X"
 
-    # 4) Extract safe bold segments from LLM-style **...**
-    bolds = []
-    def _b_sub(m):
+    def b_sub(m):
+        idx = len(bolds)
         bolds.append(m.group(1))
-        return f"__B_{len(bolds)-1}__"
-    text = _BOLD_RE.sub(_b_sub, text)
+        return f"BOLDTOKEN{idx}X"
 
-    # 5) Escape everything else as plain text
-    text = _escape_md2_text(text)
+    t = _CODEBLOCK_RE.sub(cb_sub, t)
+    t = _INLINE_CODE_RE.sub(ic_sub, t)
 
-    # 6) Restore bold segments as Telegram *...*
+    # Normalize bullets before escaping
+    t = re.sub(r"(?m)^\s*-\s+", "• ", t)
+    t = re.sub(r"(?m)^\s*\*\s+", "• ", t)
+
+    t = _BOLD_RE.sub(b_sub, t)
+
+    # Escape all remaining text
+    t = escape_md2(t)
+
+    # Restore bold
     for i, b in enumerate(bolds):
-        safe_b = _escape_md2_text(b)  # still must escape specials inside bold
-        text = text.replace(f"__B_{i}__", f"*{safe_b}*")
+        t = t.replace(f"BOLDTOKEN{i}X", f"*{escape_md2(b)}*")
 
-    # 7) Restore inline code
+    # Restore inline code
     for i, body in enumerate(inlines):
-        safe_body = _escape_md2_code(body)
-        text = text.replace(f"__IC_{i}__", f"`{safe_body}`")
+        t = t.replace(f"ICTOKEN{i}X", f"`{escape_code(body)}`")
 
-    # 8) Restore fenced code blocks
+    # Restore code blocks
     for i, (lang, body) in enumerate(codeblocks):
-        safe_body = _escape_md2_code(body)
+        body = escape_code(body)
         if lang:
-            text = text.replace(f"__CB_{i}__", f"```{lang}\n{safe_body}```")
+            t = t.replace(f"CBTOKEN{i}X", f"```{lang}\n{body}```")
         else:
-            text = text.replace(f"__CB_{i}__", f"```\n{safe_body}```")
+            t = t.replace(f"CBTOKEN{i}X", f"```\n{body}```")
 
-    return text
+    return t
