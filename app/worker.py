@@ -209,6 +209,7 @@ def process_command(chat_id: int, command: str, trace_id: str):
     structlog.contextvars.bind_contextvars(trace_id=trace_id)
     client = QdrantClient(host="qdrant", port=6333)
     msg = ""
+
     if command == "/start":
         msg = "👋 RAG Bot Active. Upload files to start."
     elif command == "/newchat":
